@@ -1,0 +1,488 @@
+import sqlite3
+from datetime import datetime
+from io import BytesIO
+
+import streamlit as st
+from PIL import Image, ImageOps
+from transformers import pipeline
+
+# -----------------------------
+# Konfiguration
+# -----------------------------
+st.set_page_config(
+    page_title="Fundbüro KI",
+    page_icon="🔎",
+    layout="wide",
+)
+
+DB_PATH = "fundbuero.db"
+MODEL_NAME = "openai/clip-vit-large-patch14"
+
+# Englische Beschreibungen funktionieren für CLIP oft gut.
+# Der Schlüssel ist der Name, der in der App angezeigt wird.
+CATEGORIES = {
+    "Schlüssel": "a photo of a key or a bunch of keys",
+    "Smartphone": "a photo of a smartphone or mobile phone",
+    "Geldbörse": "a photo of a wallet or purse",
+    "Tasche / Rucksack": "a photo of a handbag, backpack or suitcase",
+    "Kleidung": "a photo of a jacket, coat, hat or clothing",
+    "Schmuck / Uhr": "a photo of a watch, ring or piece of jewelry",
+    "Kopfhörer": "a photo of headphones or wireless earbuds",
+    "Brille": "a photo of eyeglasses or sunglasses",
+    "Regenschirm": "a photo of an umbrella",
+    "Buch / Heft": "a photo of a book, notebook or folder",
+    "Trinkflasche": "a photo of a water bottle or drinking flask",
+    "Fahrradzubehör": "a photo of a bicycle helmet or bicycle accessory",
+    "Spielzeug": "a photo of a toy or stuffed animal",
+    "Dokumente": "a photo of paper documents or an ID card",
+    "Sonstiges": "a photo of another everyday lost and found object",
+}
+
+
+# -----------------------------
+# Datenbank
+# -----------------------------
+def get_connection():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    with get_connection() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                status TEXT NOT NULL,
+                title TEXT NOT NULL,
+                category TEXT NOT NULL,
+                description TEXT,
+                location TEXT,
+                contact TEXT,
+                image BLOB,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+
+def save_item(
+    status, title, category, description,
+    location, contact, image_bytes
+):
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO items (
+                status, title, category, description,
+                location, contact, image, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            status,
+            title,
+            category,
+            description,
+            location,
+            contact,
+            image_bytes,
+            datetime.now().strftime("%Y-%m-%d %H:%M"),
+        ))
+
+
+def get_items(status=None, category=None, search=""):
+    sql = "SELECT * FROM items WHERE 1=1"
+    params = []
+
+    if status and status != "Alle":
+        sql += " AND status = ?"
+        params.append(status)
+
+    if category and category != "Alle":
+        sql += " AND category = ?"
+        params.append(category)
+
+    if search.strip():
+        term = f"%{search.strip()}%"
+        sql += """
+            AND (
+                title LIKE ? OR
+                description LIKE ? OR
+                location LIKE ? OR
+                category LIKE ?
+            )
+        """
+        params.extend([term, term, term, term])
+
+    sql += " ORDER BY id DESC"
+
+    with get_connection() as conn:
+        return conn.execute(sql, params).fetchall()
+
+
+def delete_item(item_id):
+    with get_connection() as conn:
+        conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
+
+
+# -----------------------------
+# KI von Hugging Face
+# -----------------------------
+@st.cache_resource(show_spinner=False)
+def load_model():
+    return pipeline(
+        task="zero-shot-image-classification",
+        model=MODEL_NAME,
+    )
+
+
+def recognize_object(image):
+    model = load_model()
+
+    # RGB-Format sorgt für ein einheitliches Bildeingabeformat.
+    image = ImageOps.exif_transpose(image).convert("RGB")
+
+    labels = list(CATEGORIES.values())
+
+    predictions = model(
+        image,
+        candidate_labels=labels,
+        hypothesis_template="This is {}.",
+    )
+
+    # Vorhersagen den deutschen Kategorien zuordnen.
+    description_to_category = {
+        description: category
+        for category, description in CATEGORIES.items()
+    }
+
+    results = []
+    for prediction in predictions:
+        results.append({
+            "category": description_to_category.get(
+                prediction["label"], "Sonstiges"
+            ),
+            "score": float(prediction["score"]),
+        })
+
+    return results
+
+
+# -----------------------------
+# App starten
+# -----------------------------
+init_db()
+
+st.title("🔎 Fundbüro mit KI")
+st.caption(
+    "Fundsachen erkennen, melden und wiederfinden – "
+    "unterstützt durch Hugging Face."
+)
+
+with st.sidebar:
+    st.header("Navigation")
+    page = st.radio(
+        "Bereich auswählen",
+        [
+            "Übersicht",
+            "Fundsache melden",
+            "Fundstücke suchen",
+        ],
+    )
+
+    st.divider()
+    st.caption("KI-Modell: CLIP von Hugging Face")
+
+
+# -----------------------------
+# Übersicht
+# -----------------------------
+if page == "Übersicht":
+    with get_connection() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM items"
+        ).fetchone()[0]
+
+        found = conn.execute(
+            "SELECT COUNT(*) FROM items WHERE status = ?",
+            ("Gefunden",),
+        ).fetchone()[0]
+
+        missing = conn.execute(
+            "SELECT COUNT(*) FROM items WHERE status = ?",
+            ("Vermisst",),
+        ).fetchone()[0]
+
+    st.subheader("Dein Fundbüro auf einen Blick")
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Alle Meldungen", total)
+    col2.metric("Gefundene Gegenstände", found)
+    col3.metric("Vermisste Gegenstände", missing)
+
+    st.info(
+        "Melde eine Fundsache mit Foto oder suche nach "
+        "einem Gegenstand, der verloren gegangen ist."
+    )
+
+    st.subheader("Neueste Meldungen")
+    latest = get_items()
+
+    if not latest:
+        st.write("Noch keine Meldungen vorhanden.")
+    else:
+        for item in latest[:5]:
+            with st.container(border=True):
+                col1, col2 = st.columns([1, 3])
+
+                with col1:
+                    if item["image"]:
+                        st.image(
+                            item["image"],
+                            use_container_width=True,
+                        )
+
+                with col2:
+                    st.markdown(f"**{item['title']}**")
+                    st.write(
+                        f"Status: {item['status']} · "
+                        f"Kategorie: {item['category']}"
+                    )
+                    st.caption(
+                        f"Ort: {item['location'] or 'Nicht angegeben'}"
+                    )
+                    st.write(item["description"] or "")
+                    st.caption(f"Gemeldet: {item['created_at']}")
+
+
+# -----------------------------
+# Fundsache melden
+# -----------------------------
+elif page == "Fundsache melden":
+    st.subheader("Neue Meldung erstellen")
+
+    status = st.radio(
+        "Art der Meldung",
+        ["Gefunden", "Vermisst"],
+        horizontal=True,
+    )
+
+    uploaded_file = st.file_uploader(
+        "Foto des Gegenstands hochladen",
+        type=["jpg", "jpeg", "png", "webp"],
+    )
+
+    ai_category = "Sonstiges"
+    image_bytes = None
+    predictions = []
+
+    if uploaded_file:
+        try:
+            raw_bytes = uploaded_file.getvalue()
+
+            if len(raw_bytes) > 10 * 1024 * 1024:
+                st.error("Das Bild darf maximal 10 MB groß sein.")
+                st.stop()
+
+            image = Image.open(BytesIO(raw_bytes))
+            image = ImageOps.exif_transpose(image).convert("RGB")
+
+            st.image(
+                image,
+                caption="Hochgeladenes Bild",
+                width=400,
+            )
+
+            image_buffer = BytesIO()
+            image.save(image_buffer, format="JPEG", quality=90)
+            image_bytes = image_buffer.getvalue()
+
+            if st.button("🤖 Gegenstand mit KI erkennen"):
+                with st.spinner(
+                    "Die KI analysiert das Bild. "
+                    "Beim ersten Start wird das Modell heruntergeladen..."
+                ):
+                    predictions = recognize_object(image)
+
+                st.session_state["predictions"] = predictions
+                st.session_state["predicted_image"] = image_bytes
+
+            # Vorhersage nach einem Streamlit-Neulauf behalten.
+            predictions = st.session_state.get("predictions", [])
+
+            if predictions:
+                best = predictions[0]
+                ai_category = best["category"]
+
+                st.success(
+                    f"KI-Vorschlag: {best['category']} "
+                    f"({best['score']:.1%} Ähnlichkeitsscore)"
+                )
+
+                st.caption(
+                    "Die Werte sind Modell-Scores, keine garantierten "
+                    "Wahrscheinlichkeiten. Bitte die Kategorie prüfen."
+                )
+
+                with st.expander("Weitere KI-Vorschläge"):
+                    for prediction in predictions[:5]:
+                        st.write(
+                            f"{prediction['category']}: "
+                            f"{prediction['score']:.1%}"
+                        )
+
+        except Exception as exc:
+            st.error(f"Das Bild konnte nicht verarbeitet werden: {exc}")
+
+    default_category = ai_category
+    if default_category not in CATEGORIES:
+        default_category = "Sonstiges"
+
+    category_options = list(CATEGORIES.keys())
+    default_index = category_options.index(default_category)
+
+    with st.form("item_form"):
+        title = st.text_input(
+            "Titel",
+            placeholder="z. B. Schwarzer Schlüsselbund",
+        )
+
+        category = st.selectbox(
+            "Kategorie",
+            category_options,
+            index=default_index,
+        )
+
+        description = st.text_area(
+            "Beschreibung",
+            placeholder="Farbe, Marke, besondere Merkmale...",
+        )
+
+        location = st.text_input(
+            "Fundort oder Verlustort",
+            placeholder="z. B. Stadtbibliothek",
+        )
+
+        contact = st.text_input(
+            "Kontaktmöglichkeit (optional)",
+            placeholder="E-Mail oder andere Kontaktmöglichkeit",
+        )
+
+        submitted = st.form_submit_button(
+            "Meldung speichern",
+            type="primary",
+        )
+
+        if submitted:
+            if not title.strip():
+                st.error("Bitte einen Titel eingeben.")
+            elif not location.strip():
+                st.error("Bitte einen Fund- oder Verlustort angeben.")
+            else:
+                save_item(
+                    status=status,
+                    title=title.strip(),
+                    category=category,
+                    description=description.strip(),
+                    location=location.strip(),
+                    contact=contact.strip(),
+                    image_bytes=image_bytes,
+                )
+
+                st.session_state.pop("predictions", None)
+                st.session_state.pop("predicted_image", None)
+
+                st.success("Die Meldung wurde gespeichert.")
+                st.rerun()
+
+
+# -----------------------------
+# Fundstücke suchen
+# -----------------------------
+elif page == "Fundstücke suchen":
+    st.subheader("Fundstücke durchsuchen")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        filter_status = st.selectbox(
+            "Status",
+            ["Alle", "Gefunden", "Vermisst"],
+        )
+
+    with col2:
+        filter_category = st.selectbox(
+            "Kategorie",
+            ["Alle"] + list(CATEGORIES.keys()),
+        )
+
+    search = st.text_input(
+        "Suchbegriff",
+        placeholder="z. B. Schlüssel, Bahnhof, schwarz...",
+    )
+
+    items = get_items(
+        status=filter_status,
+        category=filter_category,
+        search=search,
+    )
+
+    st.write(f"{len(items)} Meldung(en) gefunden")
+
+    if not items:
+        st.info("Keine passenden Meldungen gefunden.")
+
+    for item in items:
+        with st.container(border=True):
+            col1, col2 = st.columns([1, 2])
+
+            with col1:
+                if item["image"]:
+                    st.image(
+                        item["image"],
+                        use_container_width=True,
+                    )
+                else:
+                    st.caption("Kein Foto vorhanden")
+
+            with col2:
+                st.markdown(f"### {item['title']}")
+                st.write(f"**Status:** {item['status']}")
+                st.write(f"**Kategorie:** {item['category']}")
+                st.write(
+                    f"**Ort:** {item['location'] or 'Nicht angegeben'}"
+                )
+                st.write(item["description"] or "")
+                st.caption(f"Datum: {item['created_at']}")
+
+                if item["contact"]:
+                    st.write(
+                        f"**Kontakt:** {item['contact']}"
+                    )
+
+                if st.button(
+                    "Meldung löschen",
+                    key=f"delete_{item['id']}",
+                ):
+                    st.session_state["delete_id"] = item["id"]
+
+                if st.session_state.get("delete_id") == item["id"]:
+                    st.warning(
+                        "Möchtest du diese Meldung wirklich löschen?"
+                    )
+
+                    confirm_col, cancel_col = st.columns(2)
+
+                    with confirm_col:
+                        if st.button(
+                            "Ja, löschen",
+                            key=f"confirm_{item['id']}",
+                        ):
+                            delete_item(item["id"])
+                            st.session_state.pop("delete_id", None)
+                            st.rerun()
+
+                    with cancel_col:
+                        if st.button(
+                            "Abbrechen",
+                            key=f"cancel_{item['id']}",
+                        ):
+                            st.session_state.pop("delete_id", None)
+                            st.rerun()
