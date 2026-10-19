@@ -1,4 +1,2 @@
-streamlit
-transformers
-torch
-pillow
+streamlit>=1.36.0
+huggingface_hub>=0.27.0
