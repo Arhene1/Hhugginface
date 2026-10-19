@@ -1,286 +1,300 @@
 import os
+import sqlite3
 from datetime import datetime
+from pathlib import Path
 
+import pandas as pd
 import streamlit as st
-from huggingface_hub import InferenceClient
 
-# ------------------------------------------------------------
-# Streamlit configuration
-# ------------------------------------------------------------
-st.set_page_config(
-    page_title="Hugging Face AI Studio",
-    page_icon="🤗",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+APP_DIR = Path(__file__).parent
+DB_PATH = Path(os.getenv("FUNDBUERO_DB", str(APP_DIR / "fundbuero.db")))
+HF_MODEL = os.getenv("HF_MODEL", "Qwen/Qwen2.5-7B-Instruct")
 
-DEFAULT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
-DEFAULT_SYSTEM_PROMPT = (
-    "Du bist ein hilfreicher, präziser KI-Assistent. "
-    "Antworte standardmäßig auf Deutsch. Wenn du etwas nicht sicher weißt, "
-    "sage es offen und erfinde keine Fakten."
-)
+st.set_page_config(page_title="Fundbüro KI", page_icon="🔎", layout="wide")
 
-# ------------------------------------------------------------
-# Minimal custom styling for a dashboard-like interface
-# ------------------------------------------------------------
-st.markdown(
-    """
-    <style>
-      .block-container { padding-top: 1.6rem; padding-bottom: 2.5rem; }
-      [data-testid="stSidebar"] { border-right: 1px solid rgba(128,128,128,.22); }
-      .hero {
-        padding: 1.25rem 1.4rem;
-        border: 1px solid rgba(128,128,128,.25);
-        border-radius: 18px;
-        margin-bottom: 1rem;
-        background: linear-gradient(120deg, rgba(99,102,241,.12), rgba(20,184,166,.08));
-      }
-      .hero h1 { margin: 0 0 .35rem 0; font-size: 1.8rem; }
-      .hero p { margin: 0; opacity: .78; }
-      div[data-testid="stMetric"] {
-        border: 1px solid rgba(128,128,128,.22);
-        padding: .85rem 1rem;
-        border-radius: 14px;
-      }
-      .small-muted { opacity: .7; font-size: .88rem; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-# ------------------------------------------------------------
-# Session state
-# ------------------------------------------------------------
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {
-            "role": "assistant",
-            "content": "Hallo! Ich bin dein KI-Assistent. Stelle mir eine Frage, oder wähle unten einen Beispiel-Prompt.",
-            "time": datetime.now().strftime("%H:%M"),
-        }
-    ]
-if "request_count" not in st.session_state:
-    st.session_state.request_count = 0
-if "system_prompt" not in st.session_state:
-    st.session_state.system_prompt = DEFAULT_SYSTEM_PROMPT
+CATEGORIES = [
+    "Schlüssel", "Elektronik", "Tasche/Rucksack", "Kleidung", "Dokumente",
+    "Schmuck", "Brille", "Buch/Schreibwaren", "Sport", "Sonstiges"
+]
+STATUSES = ["Gemeldet", "Zusammengeführt", "Zurückgegeben", "Archiviert"]
 
 
-def reset_chat():
-    st.session_state.messages = [
-        {
-            "role": "assistant",
-            "content": "Neuer Chat gestartet. Wie kann ich dir helfen?",
-            "time": datetime.now().strftime("%H:%M"),
-        }
-    ]
+def connect():
+    con = sqlite3.connect(DB_PATH, check_same_thread=False)
+    con.row_factory = sqlite3.Row
+    return con
 
 
-# ------------------------------------------------------------
-# Sidebar settings
-# ------------------------------------------------------------
+def init_db():
+    with connect() as con:
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                category TEXT NOT NULL,
+                description TEXT NOT NULL,
+                location TEXT NOT NULL,
+                event_date TEXT NOT NULL,
+                contact TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Gemeldet',
+                created_at TEXT NOT NULL
+            )
+        """)
+        con.commit()
+
+
+def get_items(kind=None, include_archived=False):
+    query = "SELECT * FROM items WHERE 1=1"
+    args = []
+    if kind:
+        query += " AND kind = ?"
+        args.append(kind)
+    if not include_archived:
+        query += " AND status NOT IN ('Archiviert', 'Zurückgegeben')"
+    query += " ORDER BY created_at DESC"
+    with connect() as con:
+        return [dict(row) for row in con.execute(query, args).fetchall()]
+
+
+def save_item(data):
+    with connect() as con:
+        con.execute("""
+            INSERT INTO items
+            (kind, title, category, description, location, event_date, contact, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'Gemeldet', ?)
+        """, (
+            data["kind"], data["title"].strip(), data["category"], data["description"].strip(),
+            data["location"].strip(), data["event_date"], data["contact"].strip(),
+            datetime.now().isoformat(timespec="seconds")
+        ))
+        con.commit()
+
+
+def update_status(item_id, status):
+    with connect() as con:
+        con.execute("UPDATE items SET status = ? WHERE id = ?", (status, int(item_id)))
+        con.commit()
+
+
+def hf_client():
+    token = os.getenv("HF_TOKEN", "").strip()
+    if not token:
+        try:
+            token = str(st.secrets.get("HF_TOKEN", "")).strip()
+        except Exception:
+            token = ""
+    if not token:
+        return None
+    try:
+        from huggingface_hub import InferenceClient
+        return InferenceClient(model=HF_MODEL, token=token)
+    except Exception:
+        return None
+
+
+def ai_match(lost, found):
+    """Ask Hugging Face to assess candidate matches; fall back to transparent keyword scoring."""
+    client = hf_client()
+    if client:
+        prompt = f"""
+Du unterstützt ein deutsches Fundbüro. Vergleiche eine Verlustmeldung mit einem Fund.
+Bewerte nur anhand der angegebenen Informationen. Erfinde keine Fakten.
+Antworte auf Deutsch und kurz mit:
+- Wahrscheinlichkeit: hoch/mittel/niedrig
+- Gemeinsamkeiten: ...
+- Unterschiede/offene Fragen: ...
+- Empfehlung: ...
+Verlustmeldung:
+Titel: {lost['title']}
+Kategorie: {lost['category']}
+Beschreibung: {lost['description']}
+Ort: {lost['location']}
+Datum: {lost['event_date']}
+
+Fundmeldung:
+Titel: {found['title']}
+Kategorie: {found['category']}
+Beschreibung: {found['description']}
+Ort: {found['location']}
+Datum: {found['event_date']}
+"""
+        try:
+            response = client.chat_completion(
+                messages=[
+                    {"role": "system", "content": "Du bist ein vorsichtiger Assistent für Fundbüro-Abgleiche."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=220,
+                temperature=0.2,
+            )
+            return response.choices[0].message.content, "Hugging Face"
+        except Exception as exc:
+            ai_error = f"Hugging Face gerade nicht erreichbar ({type(exc).__name__})."
+    else:
+        ai_error = "Kein HF_TOKEN konfiguriert – es wird eine einfache lokale Ähnlichkeitssuche verwendet."
+
+    import re
+    stop = {"der", "die", "das", "und", "oder", "ein", "eine", "mit", "von", "im", "in", "am", "an",
+            "ist", "war", "den", "dem", "des", "ich", "habe", "mein", "meine", "gefunden", "verloren"}
+    def words(s):
+        return {w for w in re.findall(r"[a-zäöüß0-9]+", s.lower()) if len(w) > 2 and w not in stop}
+    a = words(" ".join(str(lost.get(k, "")) for k in ("title", "category", "description", "location")))
+    b = words(" ".join(str(found.get(k, "")) for k in ("title", "category", "description", "location")))
+    shared = sorted(a & b)
+    union = a | b
+    score = len(shared) / max(len(union), 1)
+    level = "hoch" if score >= .35 else "mittel" if score >= .15 else "niedrig"
+    result = (
+        f"**Wahrscheinlichkeit:** {level} (lokaler Stichwortvergleich: {score:.0%})\n\n"
+        f"**Gemeinsame Begriffe:** {', '.join(shared) if shared else 'Keine eindeutigen gemeinsamen Begriffe'}\n\n"
+        f"**Hinweis:** {ai_error}\n\n"
+        "Bitte den Fund anhand zusätzlicher Merkmale prüfen. Der Score ist keine verlässliche Identitätsprüfung."
+    )
+    return result, "Lokaler Fallback"
+
+
+init_db()
+
+st.title("🔎 Fundbüro mit KI-Unterstützung")
+st.caption("Verlustmeldungen und Fundstücke verwalten und mögliche Treffer vorschlagen.")
+
 with st.sidebar:
-    st.markdown("## 🤗 AI Studio")
-    st.caption("Streamlit · Hugging Face Inference API")
+    st.header("Übersicht")
+    all_active = get_items(include_archived=False)
+    st.metric("Aktive Meldungen", len(all_active))
+    st.metric("Verlustmeldungen", sum(x["kind"] == "Verlust" for x in all_active))
+    st.metric("Fundmeldungen", sum(x["kind"] == "Fund" for x in all_active))
     st.divider()
+    st.caption("KI-Modell")
+    st.code(HF_MODEL, language=None)
+    st.caption("Für die Hugging Face API muss HF_TOKEN gesetzt sein. Ohne Token funktioniert die lokale Stichwortsuche.")
 
-    st.markdown("### Verbindung")
-    token_from_env = os.getenv("HF_TOKEN", "")
-    token_input = st.text_input(
-        "Hugging Face Access Token",
-        value=token_from_env,
-        type="password",
-        help="Wird nur für diese Sitzung verwendet. Für Deployments empfiehlt sich ein Secret namens HF_TOKEN.",
-        placeholder="hf_…",
-    )
-    model_id = st.text_input(
-        "Modell-ID",
-        value=DEFAULT_MODEL,
-        help="Verwende ein Chat-Modell, das über einen Hugging Face Inference Provider verfügbar ist.",
-    )
+tab_new, tab_search, tab_match, tab_admin = st.tabs([
+    "➕ Meldung erfassen", "📋 Meldungen durchsuchen", "🤖 KI-Abgleich", "🛠️ Verwaltung"
+])
 
-    st.markdown("### Antwortverhalten")
-    temperature = st.slider("Kreativität", min_value=0.0, max_value=1.5, value=0.7, step=0.1)
-    max_tokens = st.slider("Max. Antwort-Tokens", min_value=128, max_value=2048, value=700, step=64)
-    history_limit = st.slider(
-        "Kontext: letzte Nachrichtenpaare",
-        min_value=1,
-        max_value=20,
-        value=8,
-        help="Begrenzt den Chatverlauf, der an die API gesendet wird.",
-    )
-    system_prompt = st.text_area(
-        "Systemanweisung",
-        value=st.session_state.system_prompt,
-        height=130,
-        help="Legt Rolle, Sprache und Antwortstil der KI fest.",
-    )
-    st.session_state.system_prompt = system_prompt
-
-    st.divider()
-    col_a, col_b = st.columns(2)
-    with col_a:
-        if st.button("🧹 Chat leeren", use_container_width=True):
-            reset_chat()
-            st.rerun()
-    with col_b:
-        if st.button("⬇️ Export", use_container_width=True):
-            export_text = "\n\n".join(
-                f"{m['role'].upper()} ({m.get('time', '')})\n{m['content']}"
-                for m in st.session_state.messages
+with tab_new:
+    st.subheader("Neue Verlust- oder Fundmeldung")
+    with st.form("new_item_form", clear_on_submit=True):
+        kind_label = st.radio("Art der Meldung", ["Ich habe etwas verloren", "Ich habe etwas gefunden"], horizontal=True)
+        kind = "Verlust" if kind_label.startswith("Ich habe etwas verloren") else "Fund"
+        c1, c2 = st.columns(2)
+        with c1:
+            title = st.text_input("Bezeichnung *", placeholder="z. B. schwarzer Rucksack")
+            category = st.selectbox("Kategorie", CATEGORIES)
+            location = st.text_input("Ort *", placeholder="z. B. Bibliothek, Raum 204")
+            event_date = st.date_input("Datum des Verlusts/Funds", value=datetime.now().date())
+        with c2:
+            description = st.text_area(
+                "Beschreibung *",
+                placeholder="Farbe, Marke, besondere Merkmale – keine sensiblen Daten eintragen.",
+                height=140
             )
-            st.download_button(
-                "Download TXT",
-                data=export_text,
-                file_name="ki-chat.txt",
-                mime="text/plain",
-                use_container_width=True,
-            )
+            contact = st.text_input("Kontakt für Rückfragen *", placeholder="E-Mail oder Telefonnummer")
+        privacy_ok = st.checkbox("Ich habe verstanden, dass die Angaben lokal in der Datenbank gespeichert werden.")
+        submitted = st.form_submit_button("Meldung speichern", type="primary")
+        if submitted:
+            if not all([title.strip(), location.strip(), description.strip(), contact.strip()]):
+                st.error("Bitte alle Pflichtfelder (*) ausfüllen.")
+            elif not privacy_ok:
+                st.warning("Bitte die Speicherbestätigung aktivieren.")
+            else:
+                save_item({
+                    "kind": kind, "title": title, "category": category,
+                    "description": description, "location": location,
+                    "event_date": event_date.isoformat(), "contact": contact
+                })
+                st.success("Meldung wurde gespeichert.")
+                st.rerun()
 
-    st.markdown("---")
-    st.markdown(
-        '<p class="small-muted">Tipp: Speichere Tokens nicht direkt im Quellcode '
-        'und veröffentliche sie niemals in Git-Repositories.</p>',
-        unsafe_allow_html=True,
-    )
+with tab_search:
+    st.subheader("Meldungen")
+    f1, f2, f3 = st.columns([1, 1, 2])
+    with f1:
+        kind_filter = st.selectbox("Art", ["Alle", "Verlust", "Fund"])
+    with f2:
+        category_filter = st.selectbox("Kategorie", ["Alle"] + CATEGORIES)
+    with f3:
+        search_text = st.text_input("Suchbegriff", placeholder="Bezeichnung, Beschreibung oder Ort")
+    items = get_items(kind=None if kind_filter == "Alle" else kind_filter)
+    if category_filter != "Alle":
+        items = [x for x in items if x["category"] == category_filter]
+    if search_text.strip():
+        needle = search_text.lower()
+        items = [x for x in items if needle in " ".join(str(x[k]) for k in ("title", "description", "location", "category")).lower()]
+    if not items:
+        st.info("Keine passenden aktiven Meldungen gefunden.")
+    else:
+        for item in items:
+            label = f"#{item['id']} · {item['kind']} · {item['title']}"
+            with st.expander(label):
+                a, b = st.columns([3, 1])
+                with a:
+                    st.write(f"**Kategorie:** {item['category']}")
+                    st.write(f"**Beschreibung:** {item['description']}")
+                    st.write(f"**Ort:** {item['location']}")
+                    st.write(f"**Datum:** {item['event_date']}")
+                    st.write(f"**Status:** {item['status']}")
+                    st.caption("Kontaktangaben werden in dieser Demo nur in der Detailansicht angezeigt. Schütze den Zugriff auf die App.")
+                    st.write(f"**Kontakt:** {item['contact']}")
+                with b:
+                    st.write(f"**Erstellt:** {item['created_at'][:10]}")
+                    new_status = st.selectbox(
+                        "Status ändern", STATUSES, index=STATUSES.index(item["status"]),
+                        key=f"status_{item['id']}"
+                    )
+                    if st.button("Status speichern", key=f"save_status_{item['id']}"):
+                        update_status(item["id"], new_status)
+                        st.rerun()
 
-# ------------------------------------------------------------
-# Main dashboard header and status metrics
-# ------------------------------------------------------------
-st.markdown(
-    """
-    <div class="hero">
-      <h1>Dein persönliches KI-Dashboard</h1>
-      <p>Chatte mit einem Modell von Hugging Face und passe Modell, Kontext und Antwortstil links an.</p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+with tab_match:
+    st.subheader("Mögliche Treffer finden")
+    losses = get_items(kind="Verlust")
+    finds = get_items(kind="Fund")
+    if not losses or not finds:
+        st.info("Für den Abgleich brauchst du mindestens eine aktive Verlust- und eine Fundmeldung.")
+    else:
+        loss_options = {f"#{x['id']} · {x['title']} ({x['location']})": x for x in losses}
+        selected_loss_label = st.selectbox("Verlustmeldung auswählen", list(loss_options))
+        lost = loss_options[selected_loss_label]
+        st.markdown("**Passende Fundmeldungen vergleichen**")
+        candidate_rows = []
+        for found in finds:
+            same_category = found["category"] == lost["category"]
+            same_location = found["location"].strip().lower() == lost["location"].strip().lower()
+            candidate_rows.append((found, same_category, same_location))
+        candidate_rows.sort(key=lambda x: (x[1], x[2]), reverse=True)
+        candidate_labels = {
+            f"#{f['id']} · {f['title']} · {f['category']} · {f['location']}": f
+            for f, _, _ in candidate_rows
+        }
+        selected_found_label = st.selectbox("Fundmeldung auswählen", list(candidate_labels))
+        found = candidate_labels[selected_found_label]
+        with st.expander("Details der ausgewählten Meldungen", expanded=False):
+            st.write("**Verlust:**", lost["description"])
+            st.write("**Fund:**", found["description"])
+        if st.button("🤖 Mit KI vergleichen", type="primary"):
+            with st.spinner("Vergleich wird erstellt …"):
+                result, engine = ai_match(lost, found)
+            st.caption(f"Vergleichsmethode: {engine}")
+            st.markdown(result)
+            st.warning("Die KI liefert nur einen Hinweis. Sie kann falsch liegen. Vor einer Rückgabe muss die berechtigte Person den Gegenstand anhand nicht öffentlich genannter Merkmale bestätigen.")
 
-user_messages = sum(1 for m in st.session_state.messages if m["role"] == "user")
-assistant_messages = sum(1 for m in st.session_state.messages if m["role"] == "assistant")
-
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Modell", model_id.split("/")[-1] if model_id.strip() else "Nicht gesetzt")
-m2.metric("Deine Nachrichten", user_messages)
-m3.metric("KI-Antworten", max(assistant_messages - 1, 0))
-m4.metric("API-Aufrufe", st.session_state.request_count)
-
-st.write("")
-
-chat_col, info_col = st.columns([2.25, 1], gap="large")
-
-with chat_col:
-    st.subheader("💬 Chat")
-    st.caption("Der Gesprächsverlauf bleibt in der aktuellen Streamlit-Sitzung erhalten.")
-
-    # Render conversation
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-            if message.get("time"):
-                st.caption(message["time"])
-
-    # Quick prompt buttons
-    st.markdown("**Schnellstart**")
-    q1, q2, q3 = st.columns(3)
-    selected_prompt = None
-    if q1.button("Python erklären", use_container_width=True):
-        selected_prompt = "Erkläre mir Python für Anfänger mit einem kleinen Beispiel."
-    if q2.button("Ideen sammeln", use_container_width=True):
-        selected_prompt = "Gib mir fünf kreative Ideen für ein kleines Python-Projekt."
-    if q3.button("Text verbessern", use_container_width=True):
-        selected_prompt = "Gib mir eine kurze Checkliste, mit der ich einen Text klarer und verständlicher mache."
-
-    prompt = st.chat_input("Schreibe deine Nachricht …")
-    if selected_prompt and not prompt:
-        prompt = selected_prompt
-
-    if prompt:
-        st.session_state.messages.append(
-            {"role": "user", "content": prompt, "time": datetime.now().strftime("%H:%M")}
+with tab_admin:
+    st.subheader("Datenverwaltung")
+    st.warning("Diese Demo speichert Daten in einer lokalen SQLite-Datei. Es gibt keine Benutzeranmeldung oder Rollenverwaltung. Nicht ungeschützt öffentlich bereitstellen.")
+    include_archived = st.checkbox("Zurückgegebene und archivierte Meldungen anzeigen", value=True)
+    admin_items = get_items(include_archived=include_archived)
+    if admin_items:
+        df = pd.DataFrame(admin_items)
+        st.dataframe(
+            df[["id", "kind", "title", "category", "location", "event_date", "status", "created_at"]],
+            use_container_width=True,
+            hide_index=True
         )
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        if not token_input.strip():
-            st.error(
-                "Bitte gib links einen Hugging Face Access Token ein oder setze die Umgebungsvariable HF_TOKEN."
-            )
-        elif not model_id.strip():
-            st.error("Bitte gib links eine Modell-ID ein.")
-        else:
-            with st.chat_message("assistant"):
-                answer_placeholder = st.empty()
-                try:
-                    client = InferenceClient(
-                        model=model_id.strip(),
-                        token=token_input.strip(),
-                    )
-
-                    # Include system prompt plus a bounded recent conversation.
-                    recent_messages = [
-                        {"role": m["role"], "content": m["content"]}
-                        for m in st.session_state.messages
-                        if m["role"] in ("user", "assistant")
-                    ]
-                    # Keep the most recent N user/assistant messages; the system message is added separately.
-                    recent_messages = recent_messages[-(history_limit * 2):]
-                    api_messages = []
-                    if system_prompt.strip():
-                        api_messages.append({"role": "system", "content": system_prompt.strip()})
-                    api_messages.extend(recent_messages)
-
-                    answer_parts = []
-                    stream = client.chat_completion(
-                        messages=api_messages,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        stream=True,
-                    )
-                    for chunk in stream:
-                        if not chunk.choices:
-                            continue
-                        piece = chunk.choices[0].delta.content or ""
-                        if piece:
-                            answer_parts.append(piece)
-                            answer_placeholder.markdown("".join(answer_parts) + "▌")
-
-                    answer = "".join(answer_parts).strip()
-                    if not answer:
-                        answer = "Das Modell hat keine Textantwort zurückgegeben."
-                    answer_placeholder.markdown(answer)
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": answer, "time": datetime.now().strftime("%H:%M")}
-                    )
-                    st.session_state.request_count += 1
-                    st.rerun()
-
-                except Exception as exc:
-                    answer_placeholder.empty()
-                    st.error(
-                        "Die Anfrage an Hugging Face ist fehlgeschlagen. Prüfe den Token, die Modell-ID, "
-                        "die Provider-Verfügbarkeit und deinen API-Zugang."
-                    )
-                    with st.expander("Technische Details"):
-                        st.code(str(exc))
-
-with info_col:
-    st.subheader("⚙️ Übersicht")
-    st.info(
-        "Diese App nutzt die Hugging Face Inference API. Das Modell läuft bei einem unterstützten "
-        "Inference Provider, nicht automatisch lokal auf deinem Rechner."
-    )
-    st.markdown("**Aktuelle Konfiguration**")
-    st.write(f"**Modell:** `{model_id}`")
-    st.write(f"**Kreativität:** `{temperature}`")
-    st.write(f"**Max. Tokens:** `{max_tokens}`")
-    st.write(f"**Kontext:** letzte {history_limit} Nachrichtenpaare")
-    st.write(f"**Token konfiguriert:** {'Ja' if token_input.strip() else 'Nein'}")
-
-    st.markdown("**Nützliche Links**")
-    st.markdown("- [Hugging Face Tokens](https://huggingface.co/settings/tokens)")
-    st.markdown("- [Modell-Hub](https://huggingface.co/models)")
-    st.markdown("- [InferenceClient-Dokumentation](https://huggingface.co/docs/huggingface_hub/package_reference/inference_client)")
-
-st.caption("Hinweis: Modellzugang, Verfügbarkeit und mögliche Kosten hängen von Hugging Face und dem gewählten Inference Provider ab.")
+        csv_data = df.drop(columns=["contact"], errors="ignore").to_csv(index=False).encode("utf-8-sig")
+        st.download_button("Meldungen als CSV exportieren", csv_data, "fundbuero_meldungen.csv", "text/csv")
+    else:
+        st.info("Noch keine Meldungen vorhanden.")
+    st.caption("Tipp: Sichere die Datei fundbuero.db regelmäßig und beachte Datenschutz- und Löschfristen.")

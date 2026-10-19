@@ -1,89 +1,66 @@
-# Hugging Face AI Studio — Streamlit
+# Fundbüro KI – Streamlit
 
-Ein KI-Chat mit Dashboard-Layout, Sidebar-Einstellungen und Hugging Face Inference API.
+Eine kleine deutschsprachige Fundbüro-App mit SQLite und optionaler Hugging-Face-Inference-API.
 
-## Voraussetzungen
+## Funktionen
+- Verlust- und Fundmeldungen erfassen
+- Meldungen filtern und durchsuchen
+- Status verwalten
+- Verlust- und Fundmeldungen mit Hugging Face vergleichen
+- Lokaler Stichwort-Fallback, falls kein HF-Token konfiguriert ist
+- CSV-Export
 
-- Python 3.10 oder neuer
-- Internetverbindung
-- Hugging Face Access Token mit den erforderlichen Berechtigungen
-- Modell, das über einen unterstützten Inference Provider für Chat-Completions verfügbar ist
+## Starten
 
-## Installation
+Python 3.10 oder neuer empfohlen.
 
-### 1. Projekt entpacken und Terminal öffnen
-
-Wechsle im Terminal in den Projektordner.
-
-### 2. Virtuelle Umgebung erstellen (empfohlen)
+```bash
+python -m venv .venv
+```
 
 Windows:
 ```powershell
-python -m venv .venv
 .venv\Scripts\Activate.ps1
 ```
 
-macOS / Linux:
+macOS/Linux:
 ```bash
-python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-### 3. Pakete installieren
-
+Dann:
 ```bash
-python -m pip install --upgrade pip
 pip install -r requirements.txt
-```
-
-### 4. Hugging Face Token konfigurieren
-
-Erstelle einen Token unter https://huggingface.co/settings/tokens. Gib den Token in der linken Seitenleiste der App ein, oder setze ihn als Umgebungsvariable.
-
-Windows PowerShell:
-```powershell
-$env:HF_TOKEN="hf_dein_token"
-```
-
-macOS / Linux:
-```bash
-export HF_TOKEN="hf_dein_token"
-```
-
-Für eine Bereitstellung auf Streamlit Community Cloud kannst du den Token in den App-Secrets hinterlegen:
-```toml
-HF_TOKEN = "hf_dein_token"
-```
-In `app.py` kann `os.getenv("HF_TOKEN", "")` bei Bedarf um `st.secrets.get("HF_TOKEN", "")` ergänzt werden, damit Streamlit-Secrets ebenfalls automatisch gelesen werden.
-
-**Sicherheit:** Niemals einen echten Token in `app.py` schreiben oder in ein öffentliches Git-Repository committen.
-
-### 5. App starten
-
-```bash
 streamlit run app.py
 ```
 
-Die lokale App ist normalerweise erreichbar unter:
-http://localhost:8501
+## Hugging Face konfigurieren
 
-## Modell auswählen
+1. Erstelle unter https://huggingface.co/settings/tokens einen API-Token mit den nötigen Berechtigungen.
+2. Setze `HF_TOKEN` als Umgebungsvariable.
 
-Der Standardwert ist `Qwen/Qwen2.5-7B-Instruct`. Falls dieses Modell über deine aktuelle Inference-Provider-Konfiguration nicht verfügbar ist, wähle im Hugging Face Model Hub ein Chat-Modell mit passender Inference-Provider-Unterstützung und trage dessen Modell-ID in der Sidebar ein.
+Windows PowerShell:
+```powershell
+$env:HF_TOKEN="hf_DEIN_TOKEN"
+streamlit run app.py
+```
 
-## Funktionen
+macOS/Linux:
+```bash
+export HF_TOKEN="hf_DEIN_TOKEN"
+streamlit run app.py
+```
 
-- Dashboard mit Statuskennzahlen
-- Chat-Verlauf in der aktuellen Sitzung
-- Token-Streaming für Antworten
-- Sidebar: Modell, Temperatur, Antwortlänge, Kontextfenster und Systemanweisung
-- Schnellstart-Prompts
-- Chat leeren und Verlauf als TXT exportieren
-- verständliche Fehlermeldung mit aufklappbaren technischen Details
+Optional kannst du ein anderes Inference-Modell setzen:
+```bash
+export HF_MODEL="Qwen/Qwen2.5-7B-Instruct"
+```
 
-## Häufige Probleme
+Die Verfügbarkeit und Kosten von Inference-Modellen hängen von Hugging Face und deinem Konto ab. Wenn der API-Aufruf nicht klappt oder kein Token gesetzt ist, nutzt die App einen lokalen Stichwortvergleich.
 
-- **401/403:** Token fehlt, ist ungültig oder hat nicht die nötigen Berechtigungen.
-- **404/Modell nicht verfügbar:** Modell-ID prüfen und kontrollieren, ob ein Inference Provider das Modell unterstützt.
-- **429/Rate limit:** Später erneut versuchen oder den Provider-/Account-Limits folgen.
-- **Keine Antwort:** Anderes unterstütztes Chat-Modell testen.
+## Hinweise für den echten Betrieb
+- Diese Version ist ein Prototyp: keine Anmeldung, keine Rollen und keine Zugriffskontrolle.
+- Nicht ungeschützt öffentlich ins Internet stellen.
+- Kontaktangaben und Beschreibungen können personenbezogene Daten enthalten. Vor produktivem Einsatz Datenschutz, Einwilligung, Löschfristen und Zugriffsschutz klären.
+- Keine geheimen Identifikationsmerkmale vollständig veröffentlichen; bei Rückgaben eine sichere Verifikation durchführen.
+- Für produktiven Einsatz Authentifizierung, Rollen, Audit-Logs, Backups und sichere Kontaktvermittlung ergänzen.
