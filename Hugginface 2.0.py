@@ -1,5 +1,4 @@
 
-import os
 import io
 import json
 import base64
@@ -12,15 +11,14 @@ from PIL import Image, ImageOps
 from openai import OpenAI
 
 
-# --------------------------------------------------
+# ==================================================
 # KONFIGURATION
-# --------------------------------------------------
+# ==================================================
 
 st.set_page_config(
-    page_title="FundFinder | Digitales Fundbüro",
+    page_title="FundFinder – Digitales Fundbüro",
     page_icon="🔎",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
 KATEGORIEN = [
@@ -44,46 +42,12 @@ STATUS_OPTIONEN = [
     "Zurückgegeben",
 ]
 
-# --------------------------------------------------
-# STIL
-# --------------------------------------------------
+HF_MODELL = "Qwen/Qwen3-VL-30B-A3B-Instruct"
 
-st.markdown(
-    """
-    <style>
-    .block-container {
-        padding-top: 2rem;
-        padding-bottom: 3rem;
-        max-width: 1250px;
-    }
-    .hero {
-        padding: 1.6rem;
-        border-radius: 18px;
-        background: linear-gradient(120deg, #142b4a, #236b78);
-        color: white;
-        margin-bottom: 1.5rem;
-    }
-    .hero h1 {
-        color: white;
-        margin-bottom: .35rem;
-    }
-    .hero p {
-        color: #e4f3f5;
-        margin-bottom: 0;
-    }
-    div[data-testid="stMetric"] {
-        padding: 1rem;
-        border: 1px solid rgba(128,128,128,.25);
-        border-radius: 14px;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
-# --------------------------------------------------
+# ==================================================
 # SITZUNGSSPEICHER – KEINE DATENBANK
-# --------------------------------------------------
+# ==================================================
 
 if "fundstuecke" not in st.session_state:
     st.session_state.fundstuecke = []
@@ -95,38 +59,50 @@ if "letzter_upload" not in st.session_state:
     st.session_state.letzter_upload = None
 
 
-# --------------------------------------------------
-# HUGGING FACE-ZUGANG
-# --------------------------------------------------
+# ==================================================
+# DESIGN
+# ==================================================
+
+st.markdown(
+    """
+    <style>
+    .block-container {
+        max-width: 1250px;
+        padding-top: 2rem;
+        padding-bottom: 3rem;
+    }
+    .hero {
+        background: linear-gradient(120deg, #142b4a, #236b78);
+        padding: 1.7rem;
+        border-radius: 18px;
+        color: white;
+        margin-bottom: 1.5rem;
+    }
+    .hero h1 {
+        color: white;
+        margin-bottom: .4rem;
+    }
+    .hero p {
+        color: #e4f3f5;
+        margin-bottom: 0;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ==================================================
+# HUGGING FACE KI
+# ==================================================
 
 def hole_hf_token():
-    """Liest das Token aus Streamlit Secrets oder einer Umgebungsvariable."""
-    token = os.getenv("HF_TOKEN")
-
-    if token:
-        return token
-
-    try:
-        return st.secrets["HF_TOKEN"]
-    except (KeyError, FileNotFoundError):
-        return None
-
-
-def hole_modell():
-    """Das Modell kann über Secrets oder Umgebungsvariablen geändert werden."""
-    model = os.getenv("HF_IMAGE_MODEL")
-
-    if model:
-        return model
-
-    try:
-        return st.secrets["HF_IMAGE_MODEL"]
-    except (KeyError, FileNotFoundError):
-        return "Qwen/Qwen3-VL-30B-A3B-Instruct"
+    """Liest den Token ausschließlich aus der aktuellen Sitzung."""
+    return st.session_state.get("hf_token", "").strip()
 
 
 def bereite_bild_vor(upload):
-    """Dreht das Bild korrekt, verkleinert es und erzeugt JPEG-Bytes."""
+    """Korrigiert die Bildausrichtung und verkleinert das Foto."""
     bild = Image.open(upload)
     bild = ImageOps.exif_transpose(bild).convert("RGB")
     bild.thumbnail((1280, 1280))
@@ -138,16 +114,13 @@ def bereite_bild_vor(upload):
 
 
 def analysiere_foto(bild_bytes):
-    """
-    Sendet das Foto an ein visionfähiges Modell über die
-    OpenAI-kompatible Hugging Face Inference API.
-    """
+    """Analysiert ein Foto über die Hugging Face Inference API."""
+
     token = hole_hf_token()
 
     if not token:
         raise ValueError(
-            "Das Hugging-Face-Token fehlt. "
-            "Bitte HF_TOKEN in Streamlit Secrets eintragen."
+            "Bitte gib deinen Hugging-Face-Token in der Seitenleiste ein."
         )
 
     client = OpenAI(
@@ -160,32 +133,29 @@ def analysiere_foto(bild_bytes):
 
     prompt = f"""
     Du bist eine KI für ein digitales Fundbüro.
-    Analysiere das hochgeladene Foto eines möglicherweise
-    verlorenen Gegenstands.
 
-    Erfinde keine Details, die auf dem Bild nicht erkennbar sind.
-    Nenne keine persönlichen Identitäten. Falls Dokumente oder
-    Ausweise zu sehen sind, beschreibe sie nur allgemein und gib
-    keine darauf lesbaren persönlichen Daten wieder.
+    Analysiere den Gegenstand auf dem Foto.
+    Beschreibe nur Merkmale, die tatsächlich sichtbar sind.
+    Erfinde keine Marke, keinen Fundort und keine persönlichen Angaben.
 
-    Wähle genau eine Kategorie aus dieser Liste:
+    Wähle genau eine Kategorie aus:
     {", ".join(KATEGORIEN)}
 
-    Antworte ausschließlich mit einem gültigen JSON-Objekt
-    in diesem Format:
+    Antworte ausschließlich mit einem gültigen JSON-Objekt:
+
     {{
-      "gegenstand": "kurzer Name des Gegenstands",
+      "gegenstand": "kurzer Name",
       "kategorie": "eine Kategorie aus der Liste",
-      "beschreibung": "neutrale Beschreibung sichtbarer Merkmale",
+      "beschreibung": "sichtbare Merkmale",
       "sicherheit": 0.0
     }}
 
-    "sicherheit" ist eine Schätzung zwischen 0 und 1.
-    Wenn du unsicher bist, wähle "Sonstiges" und einen niedrigen Wert.
+    Sicherheit ist eine Schätzung zwischen 0 und 1.
+    Bei Unsicherheit verwende "Sonstiges".
     """
 
     antwort = client.chat.completions.create(
-        model=hole_modell(),
+        model=HF_MODELL,
         messages=[
             {
                 "role": "user",
@@ -202,65 +172,67 @@ def analysiere_foto(bild_bytes):
         temperature=0.1,
     )
 
-    inhalt = antwort.choices[0].message.content
+    text = antwort.choices[0].message.content
 
-    if not inhalt:
-        raise ValueError("Das KI-Modell hat keine Antwort geliefert.")
+    if not text:
+        raise ValueError("Die KI hat keine Antwort zurückgegeben.")
 
-    # Entfernt mögliche Markdown-Codeblöcke um das JSON.
-    inhalt = inhalt.strip()
-    if inhalt.startswith("```"):
-        zeilen = inhalt.splitlines()
-        if zeilen:
-            zeilen = zeilen[1:]
+    text = text.strip()
+
+    # Eventuelle Markdown-Codeblöcke entfernen
+    if text.startswith("```"):
+        zeilen = text.splitlines()
+        zeilen = zeilen[1:]
         if zeilen and zeilen[-1].strip().startswith("```"):
             zeilen = zeilen[:-1]
-        inhalt = "\n".join(zeilen).strip()
+        text = "\n".join(zeilen).strip()
 
-    ergebnis = json.loads(inhalt)
+    daten = json.loads(text)
 
-    kategorie = ergebnis.get("kategorie", "Sonstiges")
+    kategorie = daten.get("kategorie", "Sonstiges")
     if kategorie not in KATEGORIEN:
         kategorie = "Sonstiges"
 
     try:
-        sicherheit = float(ergebnis.get("sicherheit", 0))
+        sicherheit = float(daten.get("sicherheit", 0))
     except (TypeError, ValueError):
         sicherheit = 0.0
 
-    sicherheit = max(0.0, min(1.0, sicherheit))
-
     return {
-        "gegenstand": str(ergebnis.get("gegenstand", "Unbekannter Gegenstand")),
+        "gegenstand": str(
+            daten.get("gegenstand", "Unbekannter Gegenstand")
+        ),
         "kategorie": kategorie,
         "beschreibung": str(
-            ergebnis.get("beschreibung", "Keine Beschreibung verfügbar.")
+            daten.get("beschreibung", "Keine Beschreibung")
         ),
-        "sicherheit": sicherheit,
+        "sicherheit": max(0.0, min(1.0, sicherheit)),
     }
 
 
-# --------------------------------------------------
+# ==================================================
 # KOPFBEREICH
-# --------------------------------------------------
+# ==================================================
 
 st.markdown(
     """
     <div class="hero">
         <h1>🔎 FundFinder</h1>
-        <p>Das intelligente digitale Fundbüro – Gegenstände erkennen,
-        Fundstücke erfassen und schneller wiederfinden.</p>
+        <p>Dein digitales Fundbüro mit KI-Bilderkennung</p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-with st.sidebar:
-    st.title("📍 Navigation")
-    st.caption("Digitales Fundbüro")
 
+# ==================================================
+# NAVIGATION UND TOKEN-EINGABE
+# ==================================================
+
+with st.sidebar:
+    st.title("📍 FundFinder")
     seite = st.radio(
-        "Bereich auswählen",
+        "Navigation",
         [
             "Dashboard",
             "Fundstück erfassen",
@@ -270,82 +242,89 @@ with st.sidebar:
     )
 
     st.divider()
-    st.caption("🤖 Bilderkennung mit Hugging Face")
-    st.caption("💾 Speicherung nur in der aktuellen Sitzung")
-    st.caption("🔒 Keine Datenbank, keine dauerhafte Speicherung")
+    st.subheader("🤖 Hugging Face KI")
+
+    st.text_input(
+        "Hugging-Face-Token",
+        type="password",
+        key="hf_token",
+        help="Wird nicht in einer Datei oder Datenbank gespeichert.",
+    )
+
+    st.caption(
+        "Der Token wird für API-Aufrufe verwendet. "
+        "Nach Verlust der Sitzung musst du ihn erneut eingeben."
+    )
+
+    st.divider()
+    st.caption("Keine Datenbank")
+    st.caption("Keine Secrets-Datei")
+    st.caption("Sitzungsbasierte Speicherung")
 
 
-# --------------------------------------------------
+# ==================================================
 # DASHBOARD
-# --------------------------------------------------
+# ==================================================
 
 if seite == "Dashboard":
     fundstuecke = st.session_state.fundstuecke
 
-    gesamt = len(fundstuecke)
-    abgegeben = sum(
-        f["status"] == "Abgegeben" for f in fundstuecke
-    )
-    gesucht = sum(
-        f["status"] == "Wird gesucht" for f in fundstuecke
-    )
-    zurueckgegeben = sum(
-        f["status"] == "Zurückgegeben" for f in fundstuecke
-    )
-
     st.subheader("Dashboard")
-    st.write("Übersicht über die Fundstücke in dieser Sitzung.")
+    st.write("Übersicht der aktuell gespeicherten Fundstücke.")
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Alle Fundstücke", gesamt)
-    c2.metric("Abgegeben", abgegeben)
-    c3.metric("Wird gesucht", gesucht)
-    c4.metric("Zurückgegeben", zurueckgegeben)
+
+    c1.metric("Gesamt", len(fundstuecke))
+    c2.metric(
+        "Abgegeben",
+        sum(f["status"] == "Abgegeben" for f in fundstuecke),
+    )
+    c3.metric(
+        "Wird gesucht",
+        sum(f["status"] == "Wird gesucht" for f in fundstuecke),
+    )
+    c4.metric(
+        "Zurückgegeben",
+        sum(f["status"] == "Zurückgegeben" for f in fundstuecke),
+    )
 
     st.divider()
-    st.subheader("Zuletzt erfasste Fundstücke")
+    st.subheader("Neueste Fundstücke")
 
     if not fundstuecke:
-        st.info(
-            "Noch keine Fundstücke vorhanden. "
-            "Öffne „Fundstück erfassen“, um ein Foto hochzuladen."
-        )
-        if st.button("＋ Erstes Fundstück erfassen", type="primary"):
-            st.session_state["navigation_ziel"] = "Fundstück erfassen"
-            st.rerun()
+        st.info("Noch keine Fundstücke vorhanden.")
     else:
         for fund in reversed(fundstuecke[-5:]):
             with st.container(border=True):
-                links, rechts = st.columns([1, 3])
+                bild_spalte, info_spalte = st.columns([1, 3])
 
-                with links:
+                with bild_spalte:
                     st.image(fund["foto"], use_container_width=True)
 
-                with rechts:
+                with info_spalte:
                     st.markdown(f"**{fund['titel']}**")
-                    st.write(f"**Kategorie:** {fund['kategorie']}")
-                    st.write(f"**Status:** {fund['status']}")
-                    st.caption(
-                        f"Erfasst am {fund['datum']} · ID: {fund['id'][:8]}"
-                    )
+                    st.write(f"Kategorie: {fund['kategorie']}")
+                    st.write(f"Status: {fund['status']}")
+                    st.write(f"Fundort: {fund['ort'] or 'Nicht angegeben'}")
                     st.write(fund["beschreibung"])
+                    st.caption(f"Erfasst: {fund['datum']}")
 
 
-# --------------------------------------------------
-# FUNDSTÜCK ERFASSEN
-# --------------------------------------------------
+# ==================================================
+# NEUES FUNDSTÜCK ERFASSEN
+# ==================================================
 
 elif seite == "Fundstück erfassen":
-    st.subheader("＋ Neues Fundstück erfassen")
+    st.subheader("＋ Fundstück erfassen")
+
     st.write(
-        "Lade ein Foto hoch. Die KI erstellt einen Vorschlag, "
-        "den du vor dem Speichern überprüfen und bearbeiten kannst."
+        "Lade ein Foto hoch und lasse die KI einen Vorschlag erstellen. "
+        "Du kannst alle Angaben vor dem Speichern bearbeiten."
     )
 
     upload = st.file_uploader(
-        "Foto des Gegenstands",
+        "Foto auswählen",
         type=["jpg", "jpeg", "png", "webp"],
-        help="Unterstützte Formate: JPG, PNG und WEBP.",
         key="foto_upload",
     )
 
@@ -357,60 +336,66 @@ elif seite == "Fundstück erfassen":
             st.image(
                 bild_bytes,
                 caption="Hochgeladenes Foto",
-                width=420,
+                width=400,
             )
         except Exception as exc:
-            st.error(f"Das Bild konnte nicht gelesen werden: {exc}")
+            st.error(f"Foto konnte nicht verarbeitet werden: {exc}")
 
-    if upload is None:
+    if bild_bytes is None:
         st.session_state.ki_ergebnis = None
         st.session_state.letzter_upload = None
+    elif st.session_state.letzter_upload != bild_bytes:
+        st.session_state.ki_ergebnis = None
+        st.session_state.letzter_upload = bild_bytes
 
     if bild_bytes is not None:
-        # Erkennt einen neuen Upload, damit alte Ergebnisse nicht
-        # versehentlich für ein anderes Bild übernommen werden.
-        if st.session_state.letzter_upload != bild_bytes:
-            st.session_state.ki_ergebnis = None
-            st.session_state.letzter_upload = bild_bytes
-
         if st.button(
             "🤖 Foto mit Hugging Face analysieren",
             type="primary",
             use_container_width=True,
         ):
-            with st.spinner("Die KI analysiert den Gegenstand ..."):
-                try:
-                    st.session_state.ki_ergebnis = analysiere_foto(bild_bytes)
-                    ergebnis = st.session_state.ki_ergebnis
+            if not hole_hf_token():
+                st.error(
+                    "Gib zuerst deinen Hugging-Face-Token "
+                    "in der Seitenleiste ein."
+                )
+            else:
+                with st.spinner("Die KI analysiert das Foto ..."):
+                    try:
+                        ergebnis = analysiere_foto(bild_bytes)
+                        st.session_state.ki_ergebnis = ergebnis
 
-                    # Vorbelegung der bearbeitbaren Eingabefelder.
-                    st.session_state["eingabe_titel"] = ergebnis["gegenstand"]
-                    st.session_state["eingabe_kategorie"] = ergebnis["kategorie"]
-                    st.session_state["eingabe_beschreibung"] = (
-                        ergebnis["beschreibung"]
-                    )
+                        # Werte für das Formular vorbereiten
+                        st.session_state["eingabe_titel"] = (
+                            ergebnis["gegenstand"]
+                        )
+                        st.session_state["eingabe_kategorie"] = (
+                            ergebnis["kategorie"]
+                        )
+                        st.session_state["eingabe_beschreibung"] = (
+                            ergebnis["beschreibung"]
+                        )
 
-                    st.success("Fotoanalyse abgeschlossen.")
-                except Exception as exc:
-                    st.error(
-                        "Die Fotoanalyse ist fehlgeschlagen. "
-                        "Prüfe dein Hugging-Face-Token, den Modellnamen "
-                        "und die Verfügbarkeit des Modells."
-                    )
-                    st.code(str(exc))
+                        st.success("KI-Analyse abgeschlossen.")
+
+                    except Exception as exc:
+                        st.error(
+                            "Die Analyse ist fehlgeschlagen. "
+                            "Prüfe Token, Modellzugriff und API-Verfügbarkeit."
+                        )
+                        st.code(str(exc))
 
     ergebnis = st.session_state.ki_ergebnis
 
     if ergebnis:
-        st.success(
-            f"KI-Vorschlag: {ergebnis['gegenstand']} "
-            f"· geschätzte Sicherheit: {ergebnis['sicherheit']:.0%}"
+        st.info(
+            f"KI-Vorschlag: {ergebnis['gegenstand']} · "
+            f"Sicherheit: {ergebnis['sicherheit']:.0%}"
         )
 
     st.divider()
-    st.markdown("#### Angaben zum Fundstück")
+    st.markdown("### Angaben zum Fundstück")
 
-    # Die Felder können auch ohne KI manuell ausgefüllt werden.
     with st.form("fundstueck_formular"):
         titel = st.text_input(
             "Name des Gegenstands *",
@@ -427,7 +412,7 @@ elif seite == "Fundstück erfassen":
         beschreibung = st.text_area(
             "Beschreibung",
             key="eingabe_beschreibung",
-            placeholder="Farbe, Marke, besondere Merkmale ...",
+            placeholder="Farbe, Marke und weitere sichtbare Merkmale",
         )
 
         ort = st.text_input(
@@ -435,7 +420,7 @@ elif seite == "Fundstück erfassen":
             placeholder="z. B. Bibliothek, Raum 204",
         )
 
-        datum_fund = st.date_input(
+        funddatum = st.date_input(
             "Funddatum",
             value=datetime.now().date(),
         )
@@ -443,7 +428,6 @@ elif seite == "Fundstück erfassen":
         status = st.selectbox(
             "Status",
             STATUS_OPTIONEN,
-            index=0,
         )
 
         speichern = st.form_submit_button(
@@ -458,36 +442,36 @@ elif seite == "Fundstück erfassen":
         elif not titel.strip():
             st.error("Bitte gib einen Namen für den Gegenstand ein.")
         else:
-            neues_fundstueck = {
-                "id": uuid.uuid4().hex,
-                "titel": titel.strip(),
-                "kategorie": kategorie,
-                "beschreibung": beschreibung.strip(),
-                "ort": ort.strip(),
-                "funddatum": datum_fund.isoformat(),
-                "status": status,
-                "datum": datetime.now().strftime("%d.%m.%Y %H:%M"),
-                "foto": bild_bytes,
-                "ki_sicherheit": (
-                    ergebnis["sicherheit"] if ergebnis else None
-                ),
-                "ki_modell": hole_modell() if ergebnis else None,
-            }
+            st.session_state.fundstuecke.append(
+                {
+                    "id": uuid.uuid4().hex,
+                    "titel": titel.strip(),
+                    "kategorie": kategorie,
+                    "beschreibung": beschreibung.strip(),
+                    "ort": ort.strip(),
+                    "funddatum": funddatum.isoformat(),
+                    "status": status,
+                    "datum": datetime.now().strftime("%d.%m.%Y %H:%M"),
+                    "foto": bild_bytes,
+                    "ki_sicherheit": (
+                        ergebnis["sicherheit"] if ergebnis else None
+                    ),
+                }
+            )
 
-            st.session_state.fundstuecke.append(neues_fundstueck)
             st.session_state.ki_ergebnis = None
             st.session_state.letzter_upload = None
 
-            st.success("Fundstück wurde in dieser Sitzung gespeichert.")
-            st.info(
-                "Hinweis: Die Daten werden nicht dauerhaft gespeichert. "
-                "Bei einem Neustart oder Sitzungsverlust können sie verloren gehen."
+            st.success("Fundstück wurde gespeichert.")
+            st.warning(
+                "Das Fundstück ist nur in der aktuellen Sitzung verfügbar. "
+                "Es wird nicht dauerhaft gespeichert."
             )
 
 
-# --------------------------------------------------
-# FUNDSTÜCKE SUCHEN UND VERWALTEN
-# --------------------------------------------------
+# ==================================================
+# SUCHEN, FILTERN UND VERWALTEN
+# ==================================================
 
 elif seite == "Fundstücke durchsuchen":
     st.subheader("🔍 Fundstücke durchsuchen")
@@ -495,24 +479,24 @@ elif seite == "Fundstücke durchsuchen":
     fundstuecke = st.session_state.fundstuecke
 
     if not fundstuecke:
-        st.info("Es sind noch keine Fundstücke vorhanden.")
+        st.info("Es sind noch keine Fundstücke gespeichert.")
     else:
         suchtext = st.text_input(
-            "Suche",
-            placeholder="Name, Beschreibung oder Fundort eingeben ...",
+            "Suchbegriff",
+            placeholder="Gegenstand, Beschreibung oder Fundort",
         )
 
-        f1, f2 = st.columns(2)
+        col1, col2 = st.columns(2)
 
-        with f1:
+        with col1:
             filter_kategorie = st.selectbox(
-                "Kategorie filtern",
+                "Kategorie",
                 ["Alle Kategorien"] + KATEGORIEN,
             )
 
-        with f2:
+        with col2:
             filter_status = st.selectbox(
-                "Status filtern",
+                "Status",
                 ["Alle Status"] + STATUS_OPTIONEN,
             )
 
@@ -556,15 +540,13 @@ elif seite == "Fundstücke durchsuchen":
 
                 with info_spalte:
                     st.markdown(f"### {fund['titel']}")
-                    st.write(f"**Kategorie:** {fund['kategorie']}")
-                    st.write(f"**Fundort:** {fund['ort'] or 'Nicht angegeben'}")
-                    st.write(f"**Funddatum:** {fund['funddatum']}")
-                    st.write(f"**Beschreibung:** {fund['beschreibung']}")
-                    st.caption(
-                        f"Erfasst: {fund['datum']} · ID: {fund['id'][:8]}"
-                    )
+                    st.write(f"Kategorie: {fund['kategorie']}")
+                    st.write(f"Beschreibung: {fund['beschreibung']}")
+                    st.write(f"Fundort: {fund['ort'] or 'Nicht angegeben'}")
+                    st.write(f"Funddatum: {fund['funddatum']}")
 
                     status_key = f"status_{fund['id']}"
+
                     if status_key not in st.session_state:
                         st.session_state[status_key] = fund["status"]
 
@@ -576,53 +558,46 @@ elif seite == "Fundstücke durchsuchen":
 
                     if neuer_status != fund["status"]:
                         fund["status"] = neuer_status
-                        st.success("Status aktualisiert.")
 
                     if st.button(
                         "🗑️ Fundstück löschen",
                         key=f"loeschen_{fund['id']}",
                     ):
                         st.session_state.fundstuecke = [
-                            f for f in st.session_state.fundstuecke
-                            if f["id"] != fund["id"]
+                            item
+                            for item in st.session_state.fundstuecke
+                            if item["id"] != fund["id"]
                         ]
                         st.session_state.pop(status_key, None)
                         st.rerun()
 
 
-# --------------------------------------------------
+# ==================================================
 # CSV-EXPORT
-# --------------------------------------------------
+# ==================================================
 
 elif seite == "Daten exportieren":
-    st.subheader("⬇️ Fundstücke exportieren")
-    st.write(
-        "Exportiere die erfassten Angaben als CSV-Datei. "
-        "Die Fotos werden nicht in die CSV-Datei eingebettet."
-    )
+    st.subheader("⬇️ Daten exportieren")
 
     fundstuecke = st.session_state.fundstuecke
 
     if not fundstuecke:
-        st.info("Es gibt noch keine Daten zum Exportieren.")
+        st.info("Keine Fundstücke zum Exportieren vorhanden.")
     else:
-        export_daten = []
-
-        for fund in fundstuecke:
-            export_daten.append(
-                {
-                    "ID": fund["id"],
-                    "Gegenstand": fund["titel"],
-                    "Kategorie": fund["kategorie"],
-                    "Beschreibung": fund["beschreibung"],
-                    "Fundort": fund["ort"],
-                    "Funddatum": fund["funddatum"],
-                    "Status": fund["status"],
-                    "Erfasst am": fund["datum"],
-                    "KI-Sicherheit": fund["ki_sicherheit"],
-                    "KI-Modell": fund["ki_modell"],
-                }
-            )
+        export_daten = [
+            {
+                "ID": fund["id"],
+                "Gegenstand": fund["titel"],
+                "Kategorie": fund["kategorie"],
+                "Beschreibung": fund["beschreibung"],
+                "Fundort": fund["ort"],
+                "Funddatum": fund["funddatum"],
+                "Status": fund["status"],
+                "Erfasst am": fund["datum"],
+                "KI-Sicherheit": fund["ki_sicherheit"],
+            }
+            for fund in fundstuecke
+        ]
 
         df = pd.DataFrame(export_daten)
 
@@ -632,19 +607,21 @@ elif seite == "Daten exportieren":
             hide_index=True,
         )
 
-        csv_daten = df.to_csv(index=False).encode("utf-8-sig")
-
         st.download_button(
             "📥 CSV herunterladen",
-            data=csv_daten,
+            data=df.to_csv(index=False).encode("utf-8-sig"),
             file_name="fundstuecke.csv",
             mime="text/csv",
             type="primary",
-            use_container_width=True,
         )
+
+
+# ==================================================
+# FOOTER
+# ==================================================
 
 st.divider()
 st.caption(
     "FundFinder · Streamlit + Hugging Face · "
-    "Ohne Datenbank · Sitzungsbasierte Speicherung"
+    "Keine Datenbank · Keine Secrets-Datei"
 )
