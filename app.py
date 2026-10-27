@@ -161,9 +161,6 @@ with st.sidebar:
     )
 
 items = load_items()
-# Compatibility with older code that still reads st.session_state.items.
-# The JSON file remains the source of truth; this alias prevents AttributeError.
-st.session_state.items = items
 tab_overview, tab_add, tab_search, tab_export = st.tabs(
     ["📊 Übersicht", "➕ Fundstück erfassen", "🔍 Suchen & verwalten", "📤 Export"]
 )

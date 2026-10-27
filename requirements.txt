@@ -1,4 +1,4 @@
-streamlit>=1.40,<2
-pandas>=2.0,<4
-Pillow>=10,<14
-requests>=2.31,<3
+streamlit>=1.40
+openai>=1.50
+pandas>=2.0
+Pillow>=10.0
