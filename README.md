@@ -1,23 +1,21 @@
+# FundFinder – korrigierte Streamlit-Version
 
-# FundFinder – Digitales Fundbüro
+## Dateien
+- `app.py`: Hauptanwendung
+- `requirements.txt`: Abhängigkeiten
 
-Eine Streamlit-Web-App zur Verwaltung von Fundstücken mit
-KI-gestützter Bilderkennung über Hugging Face.
+## Deployment auf Streamlit Community Cloud
+1. Lade `app.py` und `requirements.txt` in dein GitHub-Repository hoch.
+2. In Streamlit Community Cloud stelle als Main file path `app.py` ein.
+3. Starte die App neu.
 
-## Funktionen
-- Fotos hochladen und analysieren
-- Gegenstände automatisch kategorisieren
-- Fundstücke manuell erfassen und bearbeiten
-- Suche und Filter nach Kategorie und Status
-- CSV-Export
-- Keine Datenbank
+## Was diese Version verbessert
+- Die Fundverwaltung funktioniert auch ohne Hugging-Face-Token.
+- KI-Fehler wie 401, 403, 429 und Zeitüberschreitungen werden verständlich angezeigt.
+- Bildanalyse ist optional; ein fehlgeschlagener KI-Aufruf verhindert nicht das manuelle Erfassen.
+- Suche, Statusverwaltung und CSV-Export sind enthalten.
 
-## Starten
+## Wichtige Grenzen
+Diese Version nutzt `st.session_state` und damit keinen gemeinsamen Speicher. Andere Besucher sehen nicht automatisch dieselben Einträge; Daten können nach einem Neustart verloren gehen. Für gemeinsam sichtbare, dauerhaft gespeicherte Fundstücke ist ein gemeinsamer Speicher erforderlich (z. B. Datenbank oder ein anderer persistenter Dienst).
 
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
-
-Für die KI-Fotoanalyse muss `HF_TOKEN` in den Streamlit Secrets
-hinterlegt sein.
+Der Hugging-Face-Token wird im Seitenmenü eingegeben und nur in der jeweiligen Sitzung verwendet. Für eine produktive App mit vielen Nutzern ist eine serverseitige Secret-Konfiguration sicherer. Ein Token darf niemals in den Quellcode oder in ein öffentliches GitHub-Repository geschrieben werden.

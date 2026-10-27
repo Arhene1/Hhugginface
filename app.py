@@ -1,300 +1,264 @@
-import os
-import sqlite3
+import base64
+import io
+import json
+import uuid
 from datetime import datetime
-from pathlib import Path
 
 import pandas as pd
+import requests
 import streamlit as st
+from PIL import Image
 
-APP_DIR = Path(__file__).parent
-DB_PATH = Path(os.getenv("FUNDBUERO_DB", str(APP_DIR / "fundbuero.db")))
-HF_MODEL = os.getenv("HF_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+st.set_page_config(page_title="FundFinder", page_icon="🔎", layout="wide")
 
-st.set_page_config(page_title="Fundbüro KI", page_icon="🔎", layout="wide")
+# This version intentionally uses session state only (no database).
+# Streamlit Community Cloud does not guarantee durable/shared local-file storage.
+if "items" not in st.session_state:
+    st.session_state.items = []
+if "hf_token" not in st.session_state:
+    st.session_state.hf_token = ""
 
-CATEGORIES = [
-    "Schlüssel", "Elektronik", "Tasche/Rucksack", "Kleidung", "Dokumente",
-    "Schmuck", "Brille", "Buch/Schreibwaren", "Sport", "Sonstiges"
-]
-STATUSES = ["Gemeldet", "Zusammengeführt", "Zurückgegeben", "Archiviert"]
+MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+API_URL = "https://router.huggingface.co/v1/chat/completions"
 
+def image_to_data_url(uploaded_file):
+    image = Image.open(uploaded_file).convert("RGB")
+    image.thumbnail((1200, 1200))
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=85)
+    encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    return f"data:image/jpeg;base64,{encoded}", image
 
-def connect():
-    con = sqlite3.connect(DB_PATH, check_same_thread=False)
-    con.row_factory = sqlite3.Row
-    return con
-
-
-def init_db():
-    with connect() as con:
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                kind TEXT NOT NULL,
-                title TEXT NOT NULL,
-                category TEXT NOT NULL,
-                description TEXT NOT NULL,
-                location TEXT NOT NULL,
-                event_date TEXT NOT NULL,
-                contact TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'Gemeldet',
-                created_at TEXT NOT NULL
-            )
-        """)
-        con.commit()
-
-
-def get_items(kind=None, include_archived=False):
-    query = "SELECT * FROM items WHERE 1=1"
-    args = []
-    if kind:
-        query += " AND kind = ?"
-        args.append(kind)
-    if not include_archived:
-        query += " AND status NOT IN ('Archiviert', 'Zurückgegeben')"
-    query += " ORDER BY created_at DESC"
-    with connect() as con:
-        return [dict(row) for row in con.execute(query, args).fetchall()]
-
-
-def save_item(data):
-    with connect() as con:
-        con.execute("""
-            INSERT INTO items
-            (kind, title, category, description, location, event_date, contact, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'Gemeldet', ?)
-        """, (
-            data["kind"], data["title"].strip(), data["category"], data["description"].strip(),
-            data["location"].strip(), data["event_date"], data["contact"].strip(),
-            datetime.now().isoformat(timespec="seconds")
-        ))
-        con.commit()
-
-
-def update_status(item_id, status):
-    with connect() as con:
-        con.execute("UPDATE items SET status = ? WHERE id = ?", (status, int(item_id)))
-        con.commit()
-
-
-def hf_client():
-    token = os.getenv("HF_TOKEN", "").strip()
-    if not token:
-        try:
-            token = str(st.secrets.get("HF_TOKEN", "")).strip()
-        except Exception:
-            token = ""
-    if not token:
-        return None
+def classify_image(uploaded_file, token):
+    if not token.strip():
+        return None, "Kein Hugging-Face-Token angegeben. Du kannst das Fundstück trotzdem manuell speichern."
     try:
-        from huggingface_hub import InferenceClient
-        return InferenceClient(model=HF_MODEL, token=token)
-    except Exception:
-        return None
-
-
-def ai_match(lost, found):
-    """Ask Hugging Face to assess candidate matches; fall back to transparent keyword scoring."""
-    client = hf_client()
-    if client:
-        prompt = f"""
-Du unterstützt ein deutsches Fundbüro. Vergleiche eine Verlustmeldung mit einem Fund.
-Bewerte nur anhand der angegebenen Informationen. Erfinde keine Fakten.
-Antworte auf Deutsch und kurz mit:
-- Wahrscheinlichkeit: hoch/mittel/niedrig
-- Gemeinsamkeiten: ...
-- Unterschiede/offene Fragen: ...
-- Empfehlung: ...
-Verlustmeldung:
-Titel: {lost['title']}
-Kategorie: {lost['category']}
-Beschreibung: {lost['description']}
-Ort: {lost['location']}
-Datum: {lost['event_date']}
-
-Fundmeldung:
-Titel: {found['title']}
-Kategorie: {found['category']}
-Beschreibung: {found['description']}
-Ort: {found['location']}
-Datum: {found['event_date']}
-"""
-        try:
-            response = client.chat_completion(
-                messages=[
-                    {"role": "system", "content": "Du bist ein vorsichtiger Assistent für Fundbüro-Abgleiche."},
-                    {"role": "user", "content": prompt},
+        data_url, _ = image_to_data_url(uploaded_file)
+        response = requests.post(
+            API_URL,
+            headers={
+                "Authorization": f"Bearer {token.strip()}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": MODEL,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Analysiere das Foto eines verlorenen Gegenstands. "
+                                    "Antworte auf Deutsch und kurz mit: Gegenstand, Farbe, "
+                                    "erkennbare Marke/Details und 3 Suchbegriffe. "
+                                    "Erfinde keine Details, die nicht sichtbar sind."
+                                ),
+                            },
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                        ],
+                    }
                 ],
-                max_tokens=220,
-                temperature=0.2,
-            )
-            return response.choices[0].message.content, "Hugging Face"
-        except Exception as exc:
-            ai_error = f"Hugging Face gerade nicht erreichbar ({type(exc).__name__})."
-    else:
-        ai_error = "Kein HF_TOKEN konfiguriert – es wird eine einfache lokale Ähnlichkeitssuche verwendet."
+                "max_tokens": 220,
+                "temperature": 0.2,
+            },
+            timeout=60,
+        )
+        if response.status_code == 401:
+            return None, "Hugging Face meldet 401 (nicht autorisiert). Bitte Token prüfen. Das Speichern ohne KI funktioniert weiterhin."
+        if response.status_code == 403:
+            return None, "Hugging Face meldet 403 (Zugriff verweigert). Prüfe Token-Berechtigungen und Modellzugriff."
+        if response.status_code == 429:
+            return None, "Hugging Face meldet 429 (Limit erreicht). Versuche es später erneut."
+        if not response.ok:
+            detail = response.text[:400].replace("\n", " ")
+            return None, f"Hugging-Face-Fehler {response.status_code}: {detail}"
+        payload = response.json()
+        text = payload["choices"][0]["message"]["content"]
+        if isinstance(text, list):
+            text = "\n".join(part.get("text", "") for part in text if isinstance(part, dict))
+        return str(text).strip(), None
+    except requests.Timeout:
+        return None, "Zeitüberschreitung bei der KI-Anfrage. Du kannst das Fundstück ohne KI speichern."
+    except requests.RequestException as exc:
+        return None, f"Netzwerkfehler bei der KI-Anfrage: {exc}"
+    except (ValueError, KeyError, IndexError) as exc:
+        return None, f"Unerwartete Antwort der KI: {exc}"
+    except Exception as exc:
+        return None, f"Foto konnte nicht verarbeitet werden: {exc}"
 
-    import re
-    stop = {"der", "die", "das", "und", "oder", "ein", "eine", "mit", "von", "im", "in", "am", "an",
-            "ist", "war", "den", "dem", "des", "ich", "habe", "mein", "meine", "gefunden", "verloren"}
-    def words(s):
-        return {w for w in re.findall(r"[a-zäöüß0-9]+", s.lower()) if len(w) > 2 and w not in stop}
-    a = words(" ".join(str(lost.get(k, "")) for k in ("title", "category", "description", "location")))
-    b = words(" ".join(str(found.get(k, "")) for k in ("title", "category", "description", "location")))
-    shared = sorted(a & b)
-    union = a | b
-    score = len(shared) / max(len(union), 1)
-    level = "hoch" if score >= .35 else "mittel" if score >= .15 else "niedrig"
-    result = (
-        f"**Wahrscheinlichkeit:** {level} (lokaler Stichwortvergleich: {score:.0%})\n\n"
-        f"**Gemeinsame Begriffe:** {', '.join(shared) if shared else 'Keine eindeutigen gemeinsamen Begriffe'}\n\n"
-        f"**Hinweis:** {ai_error}\n\n"
-        "Bitte den Fund anhand zusätzlicher Merkmale prüfen. Der Score ist keine verlässliche Identitätsprüfung."
-    )
-    return result, "Lokaler Fallback"
+def reset_form():
+    for key in ("title", "description", "location", "contact"):
+        st.session_state[key] = ""
 
-
-init_db()
-
-st.title("🔎 Fundbüro mit KI-Unterstützung")
-st.caption("Verlustmeldungen und Fundstücke verwalten und mögliche Treffer vorschlagen.")
+st.title("🔎 FundFinder")
+st.caption("Fundstücke erfassen, durchsuchen und verwalten – die KI-Bilderkennung ist optional.")
 
 with st.sidebar:
-    st.header("Übersicht")
-    all_active = get_items(include_archived=False)
-    st.metric("Aktive Meldungen", len(all_active))
-    st.metric("Verlustmeldungen", sum(x["kind"] == "Verlust" for x in all_active))
-    st.metric("Fundmeldungen", sum(x["kind"] == "Fund" for x in all_active))
+    st.header("Einstellungen")
+    st.info(
+        "Ohne Token läuft die Fundverwaltung weiterhin. Für die optionale KI-Erkennung "
+        "kannst du hier deinen Hugging-Face-Token eingeben. Er wird nur in deiner "
+        "aktuellen Streamlit-Sitzung verwendet und nicht in dieser App gespeichert."
+    )
+    st.text_input("Hugging-Face-Token (optional)", type="password", key="hf_token")
+    st.caption("Teile deinen Token nicht und committe ihn niemals in GitHub.")
     st.divider()
-    st.caption("KI-Modell")
-    st.code(HF_MODEL, language=None)
-    st.caption("Für die Hugging Face API muss HF_TOKEN gesetzt sein. Ohne Token funktioniert die lokale Stichwortsuche.")
+    st.metric("Fundstücke in dieser Sitzung", len(st.session_state.items))
+    st.warning(
+        "Diese Version verwendet keinen gemeinsamen Speicher. Andere Nutzer sehen "
+        "nicht automatisch deine Einträge; Einträge können beim Neustart verloren gehen."
+    )
 
-tab_new, tab_search, tab_match, tab_admin = st.tabs([
-    "➕ Meldung erfassen", "📋 Meldungen durchsuchen", "🤖 KI-Abgleich", "🛠️ Verwaltung"
-])
+tab_dashboard, tab_add, tab_search, tab_export = st.tabs(
+    ["📊 Übersicht", "➕ Fundstück melden", "🔍 Suchen & verwalten", "📥 Export"]
+)
 
-with tab_new:
-    st.subheader("Neue Verlust- oder Fundmeldung")
-    with st.form("new_item_form", clear_on_submit=True):
-        kind_label = st.radio("Art der Meldung", ["Ich habe etwas verloren", "Ich habe etwas gefunden"], horizontal=True)
-        kind = "Verlust" if kind_label.startswith("Ich habe etwas verloren") else "Fund"
-        c1, c2 = st.columns(2)
-        with c1:
-            title = st.text_input("Bezeichnung *", placeholder="z. B. schwarzer Rucksack")
-            category = st.selectbox("Kategorie", CATEGORIES)
-            location = st.text_input("Ort *", placeholder="z. B. Bibliothek, Raum 204")
-            event_date = st.date_input("Datum des Verlusts/Funds", value=datetime.now().date())
-        with c2:
-            description = st.text_area(
-                "Beschreibung *",
-                placeholder="Farbe, Marke, besondere Merkmale – keine sensiblen Daten eintragen.",
-                height=140
-            )
-            contact = st.text_input("Kontakt für Rückfragen *", placeholder="E-Mail oder Telefonnummer")
-        privacy_ok = st.checkbox("Ich habe verstanden, dass die Angaben lokal in der Datenbank gespeichert werden.")
-        submitted = st.form_submit_button("Meldung speichern", type="primary")
-        if submitted:
-            if not all([title.strip(), location.strip(), description.strip(), contact.strip()]):
-                st.error("Bitte alle Pflichtfelder (*) ausfüllen.")
-            elif not privacy_ok:
-                st.warning("Bitte die Speicherbestätigung aktivieren.")
-            else:
-                save_item({
-                    "kind": kind, "title": title, "category": category,
-                    "description": description, "location": location,
-                    "event_date": event_date.isoformat(), "contact": contact
-                })
-                st.success("Meldung wurde gespeichert.")
-                st.rerun()
+with tab_dashboard:
+    items = st.session_state.items
+    total = len(items)
+    open_count = sum(1 for item in items if item["status"] == "Offen")
+    returned_count = sum(1 for item in items if item["status"] == "Zurückgegeben")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Alle Fundstücke", total)
+    c2.metric("Noch offen", open_count)
+    c3.metric("Zurückgegeben", returned_count)
+
+    if not items:
+        st.info("Noch keine Fundstücke vorhanden. Lege im Tab „Fundstück melden“ den ersten Eintrag an.")
+    else:
+        df = pd.DataFrame(
+            [{k: v for k, v in item.items() if k != "image_bytes"} for item in items]
+        )
+        st.dataframe(df[["created_at", "title", "location", "status", "description"]], use_container_width=True, hide_index=True)
+
+with tab_add:
+    st.subheader("Neues Fundstück erfassen")
+    with st.form("add_item_form", clear_on_submit=False):
+        title = st.text_input("Bezeichnung *", key="title", placeholder="z. B. Schwarzer Rucksack")
+        description = st.text_area("Beschreibung", key="description", placeholder="Besondere Merkmale, Inhalt, Zustand …")
+        location = st.text_input("Fundort *", key="location", placeholder="z. B. Bibliothek, Raum 204")
+        contact = st.text_input("Kontakt / Abholhinweis (optional)", key="contact")
+        uploaded = st.file_uploader("Foto (optional)", type=["png", "jpg", "jpeg", "webp"])
+        use_ai = st.checkbox("Foto mit Hugging Face analysieren (Token erforderlich)", value=False)
+        submitted = st.form_submit_button("Fundstück speichern", type="primary")
+
+    if submitted:
+        if not title.strip() or not location.strip():
+            st.error("Bitte mindestens Bezeichnung und Fundort ausfüllen.")
+        else:
+            ai_description = ""
+            image_bytes = None
+            image_mime = None
+            if uploaded is not None:
+                try:
+                    image = Image.open(uploaded).convert("RGB")
+                    preview = io.BytesIO()
+                    image.save(preview, format="JPEG", quality=85)
+                    image_bytes = preview.getvalue()
+                    image_mime = "image/jpeg"
+                    if use_ai:
+                        with st.spinner("Foto wird analysiert …"):
+                            ai_description, ai_error = classify_image(uploaded, st.session_state.hf_token)
+                        if ai_error:
+                            st.warning(ai_error)
+                        elif ai_description:
+                            st.success("KI-Analyse abgeschlossen.")
+                except Exception as exc:
+                    st.error(f"Das Foto konnte nicht gelesen werden: {exc}")
+            elif use_ai:
+                st.warning("Bitte lade ein Foto hoch, um die KI-Analyse zu verwenden.")
+
+            item = {
+                "id": str(uuid.uuid4())[:8],
+                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "title": title.strip(),
+                "description": description.strip(),
+                "location": location.strip(),
+                "contact": contact.strip(),
+                "status": "Offen",
+                "ai_analysis": ai_description or "",
+                "image_bytes": image_bytes,
+                "image_mime": image_mime,
+            }
+            st.session_state.items.insert(0, item)
+            st.success("Fundstück wurde in dieser Sitzung gespeichert.")
+            if ai_description:
+                st.markdown("**KI-Ergebnis**")
+                st.write(ai_description)
+            st.caption("Hinweis: Ohne gemeinsamen Speicher ist dieser Eintrag nicht für andere Nutzer sichtbar.")
+            st.rerun()
 
 with tab_search:
-    st.subheader("Meldungen")
-    f1, f2, f3 = st.columns([1, 1, 2])
-    with f1:
-        kind_filter = st.selectbox("Art", ["Alle", "Verlust", "Fund"])
-    with f2:
-        category_filter = st.selectbox("Kategorie", ["Alle"] + CATEGORIES)
-    with f3:
-        search_text = st.text_input("Suchbegriff", placeholder="Bezeichnung, Beschreibung oder Ort")
-    items = get_items(kind=None if kind_filter == "Alle" else kind_filter)
-    if category_filter != "Alle":
-        items = [x for x in items if x["category"] == category_filter]
-    if search_text.strip():
-        needle = search_text.lower()
-        items = [x for x in items if needle in " ".join(str(x[k]) for k in ("title", "description", "location", "category")).lower()]
-    if not items:
-        st.info("Keine passenden aktiven Meldungen gefunden.")
-    else:
-        for item in items:
-            label = f"#{item['id']} · {item['kind']} · {item['title']}"
-            with st.expander(label):
-                a, b = st.columns([3, 1])
-                with a:
-                    st.write(f"**Kategorie:** {item['category']}")
-                    st.write(f"**Beschreibung:** {item['description']}")
-                    st.write(f"**Ort:** {item['location']}")
-                    st.write(f"**Datum:** {item['event_date']}")
-                    st.write(f"**Status:** {item['status']}")
-                    st.caption("Kontaktangaben werden in dieser Demo nur in der Detailansicht angezeigt. Schütze den Zugriff auf die App.")
-                    st.write(f"**Kontakt:** {item['contact']}")
-                with b:
-                    st.write(f"**Erstellt:** {item['created_at'][:10]}")
-                    new_status = st.selectbox(
-                        "Status ändern", STATUSES, index=STATUSES.index(item["status"]),
-                        key=f"status_{item['id']}"
-                    )
-                    if st.button("Status speichern", key=f"save_status_{item['id']}"):
-                        update_status(item["id"], new_status)
-                        st.rerun()
+    st.subheader("Fundstücke suchen und verwalten")
+    q = st.text_input("Suchbegriff", placeholder="Bezeichnung, Beschreibung oder Fundort")
+    status_filter = st.selectbox("Status", ["Alle", "Offen", "Zurückgegeben"])
+    filtered = []
+    for item in st.session_state.items:
+        searchable = " ".join([
+            item["title"], item["description"], item["location"], item["contact"], item["ai_analysis"]
+        ]).casefold()
+        if q.casefold() in searchable and (status_filter == "Alle" or item["status"] == status_filter):
+            filtered.append(item)
 
-with tab_match:
-    st.subheader("Mögliche Treffer finden")
-    losses = get_items(kind="Verlust")
-    finds = get_items(kind="Fund")
-    if not losses or not finds:
-        st.info("Für den Abgleich brauchst du mindestens eine aktive Verlust- und eine Fundmeldung.")
+    if not filtered:
+        st.info("Keine passenden Fundstücke gefunden.")
     else:
-        loss_options = {f"#{x['id']} · {x['title']} ({x['location']})": x for x in losses}
-        selected_loss_label = st.selectbox("Verlustmeldung auswählen", list(loss_options))
-        lost = loss_options[selected_loss_label]
-        st.markdown("**Passende Fundmeldungen vergleichen**")
-        candidate_rows = []
-        for found in finds:
-            same_category = found["category"] == lost["category"]
-            same_location = found["location"].strip().lower() == lost["location"].strip().lower()
-            candidate_rows.append((found, same_category, same_location))
-        candidate_rows.sort(key=lambda x: (x[1], x[2]), reverse=True)
-        candidate_labels = {
-            f"#{f['id']} · {f['title']} · {f['category']} · {f['location']}": f
-            for f, _, _ in candidate_rows
-        }
-        selected_found_label = st.selectbox("Fundmeldung auswählen", list(candidate_labels))
-        found = candidate_labels[selected_found_label]
-        with st.expander("Details der ausgewählten Meldungen", expanded=False):
-            st.write("**Verlust:**", lost["description"])
-            st.write("**Fund:**", found["description"])
-        if st.button("🤖 Mit KI vergleichen", type="primary"):
-            with st.spinner("Vergleich wird erstellt …"):
-                result, engine = ai_match(lost, found)
-            st.caption(f"Vergleichsmethode: {engine}")
-            st.markdown(result)
-            st.warning("Die KI liefert nur einen Hinweis. Sie kann falsch liegen. Vor einer Rückgabe muss die berechtigte Person den Gegenstand anhand nicht öffentlich genannter Merkmale bestätigen.")
+        for item in filtered:
+            with st.expander(f'{item["title"]} · {item["location"]} · {item["status"]}'):
+                if item.get("image_bytes"):
+                    st.image(item["image_bytes"], width=280)
+                st.write(f'**Fundort:** {item["location"]}')
+                st.write(f'**Gemeldet:** {item["created_at"]}')
+                st.write(f'**Beschreibung:** {item["description"] or "Keine Beschreibung"}')
+                if item["contact"]:
+                    st.write(f'**Kontakt / Hinweis:** {item["contact"]}')
+                if item["ai_analysis"]:
+                    st.write("**KI-Analyse:**")
+                    st.write(item["ai_analysis"])
+                col_status, col_delete = st.columns(2)
+                new_status = col_status.selectbox(
+                    "Status ändern",
+                    ["Offen", "Zurückgegeben"],
+                    index=0 if item["status"] == "Offen" else 1,
+                    key=f'status_{item["id"]}',
+                )
+                if col_status.button("Status übernehmen", key=f'update_{item["id"]}'):
+                    for stored in st.session_state.items:
+                        if stored["id"] == item["id"]:
+                            stored["status"] = new_status
+                            break
+                    st.rerun()
+                if col_delete.button("Eintrag löschen", key=f'delete_{item["id"]}'):
+                    st.session_state.items = [
+                        stored for stored in st.session_state.items if stored["id"] != item["id"]
+                    ]
+                    st.rerun()
 
-with tab_admin:
-    st.subheader("Datenverwaltung")
-    st.warning("Diese Demo speichert Daten in einer lokalen SQLite-Datei. Es gibt keine Benutzeranmeldung oder Rollenverwaltung. Nicht ungeschützt öffentlich bereitstellen.")
-    include_archived = st.checkbox("Zurückgegebene und archivierte Meldungen anzeigen", value=True)
-    admin_items = get_items(include_archived=include_archived)
-    if admin_items:
-        df = pd.DataFrame(admin_items)
-        st.dataframe(
-            df[["id", "kind", "title", "category", "location", "event_date", "status", "created_at"]],
-            use_container_width=True,
-            hide_index=True
+with tab_export:
+    st.subheader("Daten exportieren")
+    if not st.session_state.items:
+        st.info("Noch keine Daten zum Export vorhanden.")
+    else:
+        export_rows = []
+        for item in st.session_state.items:
+            export_rows.append({
+                "ID": item["id"],
+                "Erstellt am": item["created_at"],
+                "Bezeichnung": item["title"],
+                "Beschreibung": item["description"],
+                "Fundort": item["location"],
+                "Kontakt / Hinweis": item["contact"],
+                "Status": item["status"],
+                "KI-Analyse": item["ai_analysis"],
+            })
+        export_df = pd.DataFrame(export_rows)
+        csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "CSV herunterladen",
+            data=csv_bytes,
+            file_name="fundfinder_export.csv",
+            mime="text/csv",
+            type="primary",
         )
-        csv_data = df.drop(columns=["contact"], errors="ignore").to_csv(index=False).encode("utf-8-sig")
-        st.download_button("Meldungen als CSV exportieren", csv_data, "fundbuero_meldungen.csv", "text/csv")
-    else:
-        st.info("Noch keine Meldungen vorhanden.")
-    st.caption("Tipp: Sichere die Datei fundbuero.db regelmäßig und beachte Datenschutz- und Löschfristen.")
+        st.caption("Fotos sind nicht in der CSV enthalten.")
